@@ -1,0 +1,27 @@
+**/misc/
+**/aztfexport/
+**/azure-application-gateway-microhack/
+**/chaos/
+**/aca/
+
+# Terraform files
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfplan
+**/*.tfvars
+
+# Crash log files
+**/crash.log
+
+# Ignore override files as they are usually managed separately
+**/override.tf
+**/override.tf.json
+**/*_override.tf
+**/*_override.tf.json
+
+# Ignore CLI configuration files
+**/.terraformrc
+**/terraform.rc
+
+# Ignore Terraform working directory
+**/.terraform/
