@@ -1,27 +1,8 @@
 # Path Rules Azure Application Gateway
 
-## Challenge
+## Introduction
 
-~~~mermaid
-classDiagram
-    AGW <|-- Client
-    Storage1 <|-- AGW
-    Storage2 <|-- AGW
-    class AGW{
-    }
-    class Client{
-    }
-    class Storage1{
-        container1
-        spiderman.txt
-    }
-    class Storage2{
-        container2
-        batman.txt
-    }
-~~~
-
-We do have two Azure Storage accounts which will serve different files. Access to the storage accounts will be done via the Azure Application Gateway. 
+We do have two Azure Storage accounts which will serve different files. Access to the storage accounts will be done via the Azure Application Gateway.
 
 Inside the Applicaiton Gateway we will use URL Path Based Routing to route the requests to the correct storage account.
 
@@ -34,6 +15,36 @@ Access via the Application Gateway will look as follows:
 
 - storage1: http://agw.swedencentral.cloudapp.azure.com/app1/container1/spiderman.txt
 - storage2: http://agw.swedencentral.cloudapp.azure.com/app2/container1/batman.txt
+
+~~~mermaid
+flowchart TD
+    subgraph Client
+        A[Client Request]
+    end
+
+    subgraph AGW[Azure Application Gateway]
+        decision{Path<br>Component?}
+    end
+
+    subgraph Storage1["Storage Account 1 (cptdagwstorage1)"]
+        S1[container1/spiderman.txt]
+    end
+
+    subgraph Storage2["Storage Account 2 (cptdagwstorage2)"]
+        S2[container2/batman.txt]
+    end
+
+    A --> AGW
+    AGW --> decision
+    decision -- "/app1/*" --> S1
+    decision -- "/app2/*" --> S2
+~~~
+
+- The Application Gateway inspects the first path component (`app1` or `app2`) of each incoming request.
+- Based on this, it routes the request to the correct backend storage account.
+- All requests use the same FQDN for the Application Gateway; the path determines the backend.
+- The Application Gateway will strip out the first path component (`app1` or `app2`) before forwarding the request to the storage account.
+
 
 ## Deployment
 
@@ -50,7 +61,7 @@ tf apply --auto-approve 01.tfplan
 
 ## How the rewrite Rule works
 
-The Application Gateway implements a path rewrite mechanism that allows clients to access different storage accounts using clean, application-specific paths while translating them to the actual backend paths. This is particularly useful for microservices architecture where you want to expose clean public APIs while routing to different backend services.
+The Application Gateway implements a path rewrite mechanism that allows clients to access different storage accounts using clean, application-specific paths ("/app1", "/app2") while translating them to the actual backend paths. This is particularly useful for microservices architecture where you want to expose clean public APIs while routing to different backend services.
 
 ### Backend Configuration
 
@@ -85,7 +96,7 @@ backend_http_settings {
 }
 ~~~
 
-Key Setting: pick_host_name_from_backend_address = true ensures the Application Gateway uses the storage account's FQDN as the Host header when forwarding requests.
+Key Setting: pick_host_name_from_backend_address = true ensures the Application Gateway uses the storage account's FQDN as the HTTP Host header when forwarding requests.
 
 ### Request Routing Configuration
 
@@ -103,6 +114,8 @@ http_listener {
 ~~~
 
 Purpose: Listens for incoming HTTP requests on port 80 for the specific hostname.
+
+> NOTE: We make use of port 80 and therefore of HTTP instead of HTTPS. This is just for the sake of simplicity. In a production environment, you would typically use HTTPS.
 
 Request Routing Rule
 
@@ -150,8 +163,11 @@ How It Works:
 Default Route: Any request not matching specific paths goes to storage1
 App1 Route: Requests to /app1/* go to storage1 with app1 rewrite rules
 App2 Route: Requests to /app2/* go to storage2 with app2 rewrite rules
-4. Rewrite Rule Sets - The Path Transformation Magic
+
+### Rewrite Rule Sets - The Path Transformation Magic
+
 App1 Rewrite Rule
+
 ~~~hcl
 url_path_map {
   name                               = var.prefix
@@ -200,7 +216,8 @@ rewrite_rule_set {
 }
 ~~~
 
-5. Detailed Rewrite Logic Explanation
+### Detailed Rewrite Logic Explanation
+
 Pattern Matching
 
 ~~~text
@@ -209,7 +226,7 @@ variable = "var_uri_path"
 ~~~
 
 Pattern: Uses regex to match the incoming path
-/app1(/.*): Captures everything after /app1 into group 1
+/app1(/.*): Captures everything after "/app1" into group 1. The Brackets, which are part of the regex Capture Group syntax allows us to capture the rest of the path after "/app1".
 Variable: var_uri_path refers to the full URI path of the incoming request
 
 Path Transformation
@@ -224,34 +241,40 @@ url {
 ~~~
 
 components = "path_only": Only rewrites the path, not the query string or other components
-path = "{var_uri_path_1}": Uses the first captured group from the regex
+path = "{var_uri_path_1}": Uses the first captured group from the regex. In case we would have been using multiple capture groups, we could have used {var_uri_path_2}, {var_uri_path_3}, etc.
 {var_uri_path_1}: References the first capture group (/.*)
-1. Request Flow Examples
-Example 1: App1 Request
+
+### Request Flow Examples
+
+#### Example 1: App1 Request
+
 Incoming Request: GET http://cptdagwpr.swedencentral.cloudapp.azure.com/app1/container1/file.txt
 
 Processing Flow:
 
-Listener: Receives request on port 80
-Path Matching: /app1/container1/file.txt matches path rule app1 (/app1/*)
-Rewrite Rule:
-Pattern /app1(/.*) matches /app1/container1/file.txt
-Capture group 1: /container1/file.txt
-New path: {var_uri_path_1} = /container1/file.txt
-Backend Forward: Request sent to storage1 as GET https://cptdagwstorage1.blob.core.windows.net/container1/file.txt
-Example 2: App2 Request
+- Listener: Receives request on port 80
+- Path Matching: /app1/container1/file.txt matches path rule app1 (/app1/*)
+- Rewrite Rule:
+ - Pattern /app1(/.*) matches /app1/container1/file.txt
+  - Capture group 1: /container1/file.txt
+  - New path: {var_uri_path_1} = /container1/file.txt
+- Backend Forward: Request sent to storage1 as GET https://cptdagwstorage1.blob.core.windows.net/container1/file.txt
+
+#### Example 2: App2 Request
+
 Incoming Request: GET http://cptdagwpr.swedencentral.cloudapp.azure.com/app2/container1/batman.txt
 
 Processing Flow:
 
-Listener: Receives request on port 80
-Path Matching: /app2/container1/batman.txt matches path rule app2 (/app2/*)
-Rewrite Rule:
-Pattern /app2(/.*) matches /app2/container1/batman.txt
-Capture group 1: /container1/batman.txt
-New path: {var_uri_path_1} = /container1/batman.txt
-Backend Forward: Request sent to storage2 as GET https://cptdagwstorage2.blob.core.windows.net/container1/batman.txt
-7. Health Probes
+- Listener: Receives request on port 80
+- Path Matching: /app2/container1/batman.txt matches path rule app2 (/app2/*)
+- Rewrite Rule:
+ - Pattern /app2(/.*) matches /app2/container1/batman.txt
+  - Capture group 1: /container1/batman.txt
+  - New path: {var_uri_path_1} = /container1/batman.txt
+- Backend Forward: Request sent to storage2 as GET https://cptdagwstorage2.blob.core.windows.net/container1/batman.txt
+
+### Health Probes
 
 ~~~hcl
 probe {
@@ -266,19 +289,7 @@ probe {
 
 Purpose: Monitors backend health by checking /container1/heartbeat.html on each storage account.
 
-8. Key Benefits of This Design
-Clean Public API: Clients see /app1/ and /app2/ instead of storage account names
-Backend Flexibility: Easy to change backend services without affecting client code
-Path Abstraction: Internal storage structure is hidden from clients
-Load Distribution: Different apps can be routed to different storage accounts
-Scalability: Easy to add new applications with their own rewrite rules
-9. Configuration Summary
-Component	Purpose	Key Setting
-Path Rules	Route based on URL path	paths = ["/app1/*"]
-Rewrite Rules	Transform incoming paths	pattern = "/app1(/.*)"
-Backend Pools	Define target services	Different storage accounts
-HTTP Settings	Configure backend communication	HTTPS, port 443
-This design effectively creates a reverse proxy that provides clean, application-specific URLs while routing to the appropriate backend storage accounts and transforming the paths as needed.
+> IMPORTANT: The path does not contain app1 or app2, as the health probe checks the actual backend service directly without going through the Application Gateway's path rewrite rules.
 
 ## Test
 
@@ -317,8 +328,6 @@ AccountName      CallerIpAddress    StatusCode    TableName      Uri
 ---------------  -----------------  ------------  -------------  --------------------------------------------------------------------------
 cptdagwstorage1  10.0.0.6:29182     200           PrimaryResult  https://cptdagwstorage1.blob.core.windows.net:443/container1/spiderman.txt
 cptdagwstorage2  10.0.0.6:47082     200           PrimaryResult  https://cptdagwstorage2.blob.core.windows.net:443/container1/batman.txt
-
-
 
 ## cleanup
 
