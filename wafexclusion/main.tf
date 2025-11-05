@@ -20,19 +20,13 @@ provider "azurerm" {
   subscription_id = var.subscription_id
 }
 
-# Random suffix for unique resource names
-resource "random_id" "suffix" {
-  byte_length = 4
-}
-
 locals {
-  resource_prefix = "cptdazwafexclude"
-  location        = "East US"
+  location = "East US"
 }
 
 # Resource Group
 resource "azurerm_resource_group" "main" {
-  name     = "${local.resource_prefix}-rg-${random_id.suffix.hex}"
+  name     = var.prefix
   location = local.location
 
   tags = {
@@ -44,7 +38,7 @@ resource "azurerm_resource_group" "main" {
 
 # Virtual Network
 resource "azurerm_virtual_network" "main" {
-  name                = "${local.resource_prefix}-vnet-${random_id.suffix.hex}"
+  name                = var.prefix
   address_space       = ["10.0.0.0/16"]
   location            = azurerm_resource_group.main.location
   resource_group_name = azurerm_resource_group.main.name
@@ -54,7 +48,7 @@ resource "azurerm_virtual_network" "main" {
 
 # Backend Subnet (shared by both AGWs)
 resource "azurerm_subnet" "backend" {
-  name                 = "backend-subnet"
+  name                 = "${var.prefix}1"
   resource_group_name  = azurerm_resource_group.main.name
   virtual_network_name = azurerm_virtual_network.main.name
   address_prefixes     = ["10.0.2.0/24"]
@@ -62,7 +56,7 @@ resource "azurerm_subnet" "backend" {
 
 # Network Security Group for backend
 resource "azurerm_network_security_group" "backend" {
-  name                = "${local.resource_prefix}-backend-nsg-${random_id.suffix.hex}"
+  name                = var.prefix
   location            = azurerm_resource_group.main.location
   resource_group_name = azurerm_resource_group.main.name
 
@@ -101,7 +95,7 @@ resource "azurerm_subnet_network_security_group_association" "backend" {
 
 # Log Analytics Workspace for WAF logs
 resource "azurerm_log_analytics_workspace" "main" {
-  name                = "${local.resource_prefix}-law-${random_id.suffix.hex}"
+  name                = var.prefix
   location            = azurerm_resource_group.main.location
   resource_group_name = azurerm_resource_group.main.name
   sku                 = "PerGB2018"

@@ -2,7 +2,17 @@
 
 ## Overview
 
-Demonstrates how to implement **URL-specific WAF exclusions** using two separate Application Gateways with different WAF policies. This is the **correct production pattern** for excluding specific URLs from WAF protection while maintaining security on all other paths.
+Demonstrates how to exclude certain URLs from CRS "941170" on Azure Application Gateway WAF.
+
+## WAF Policy Comparison
+
+This setup deploys two Application Gateways with different WAF policies to demonstrate path-specific exclusions.
+
+Standard Policy: Uses only managed OWASP rules. All traffic is inspected against rule 941170 (XSS detection). XSS patterns are blocked on all paths.
+
+Exclusion Policy: Adds a custom allow rule with priority 1. The custom rule matches requests to /admin/users and allows them before managed rules execute. XSS patterns in /admin/users bypass rule 941170. Other paths still trigger rule 941170 blocks.
+
+The exclusion works because custom rules are evaluated before managed rules. When a request to /admin/users arrives, the Allow action stops further inspection. Requests to other paths skip the custom rule and continue to managed rule evaluation.
 
 ## Key Features
 
@@ -14,630 +24,294 @@ Demonstrates how to implement **URL-specific WAF exclusions** using two separate
 
 ## Quick Start
 
-```bash
+```powershell
 # Deploy infrastructure
 terraform init
 terraform apply -auto-approve
 
 # Get the IP addresses
 terraform output
-```
 
-## Quick Test (HTTPie)
-
-```bash
 # Get IPs from terraform output
-export AGW_STD="<AGW_STANDARD_IP>"
-export AGW_EXCL="<AGW_EXCLUSION_IP>"
-
-# Test 1: Normal request (both allow)
-http GET http://$AGW_STD/admin/users
-http GET http://$AGW_EXCL/admin/users
-
-# Test 2: XSS attack (Standard blocks, Exclusion allows)
-http GET http://$AGW_STD/admin/users "Referer:javascript:alert(1)"   # 403 Blocked
-http GET http://$AGW_EXCL/admin/users "Referer:javascript:alert(1)"  # 200 Allowed
-
-# Test 3: XSS on different path (both block - proves path-specific)
-http GET http://$AGW_STD/test-xss "Referer:javascript:alert(1)"      # 403 Blocked
-http GET http://$AGW_EXCL/test-xss "Referer:javascript:alert(1)"     # 403 Blocked
+$agwStandardPubIP = terraform output -raw agw_standard_public_ip
+$agwExclusionPubIP = terraform output -raw agw_exclusion_public_ip
+$lawName = terraform output -raw log_analytics_workspace_name
+$rgName = terraform output -raw resource_group_name
+$workspaceId = az monitor log-analytics workspace show --resource-group $rgName --workspace-name $lawName --query "customerId" --out tsv
 ```
 
----
+## Test: Normal request Standard AGW
 
-## Detailed Test Cases
+~~~powershell
+http GET http://$agwStandardPubIP/admin/users
+HTTP/1.1 200 OK
+Connection: keep-alive
+Content-Length: 97
+Content-Type: application/json
+Date: Wed, 05 Nov 2025 20:35:04 GMT
+Server: nginx/1.18.0 (Ubuntu)
 
-### Test 1: Normal Request to /admin/users
-
-**Objective:** Verify both AGWs allow legitimate traffic without malicious payloads.
-
-**HTTP Request:**
-```bash
-# Using HTTPie (recommended)
-http GET http://<AGW_STD_IP>/admin/users
-http GET http://<AGW_EXCL_IP>/admin/users
-
-# Using curl
-curl -v http://<AGW_STD_IP>/admin/users
-curl -v http://<AGW_EXCL_IP>/admin/users
-```
-
-**Expected Result:**
-- AGW-Standard: ✅ 200 OK
-- AGW-Exclusion: ✅ 200 OK
-
-Both return JSON:
-```json
 {
-    "status": "success",
     "message": "User management endpoint",
-    "timestamp": "2025-11-05T05:14:34+00:00"
-}
-```
-
-**Relevant Terraform (waf-simple.tf):**
-```hcl
-# Backend Pool (Shared by both AGWs)
-backend_address_pool {
-  name  = "backend-pool"
-  fqdns = []
-  ip_addresses = [
-    azurerm_network_interface.backend.private_ip_address
-  ]
-}
-
-backend_http_settings {
-  name                  = "backend-http-settings"
-  cookie_based_affinity = "Disabled"
-  port                  = 80
-  protocol              = "Http"
-  request_timeout       = 60
-}
-```
-
-**Log Analytics Query:**
-```kusto
-AGWFirewallLogs
-| where TimeGenerated > ago(1h)
-| where requestUri_s contains "/admin/users"
-| where Message !contains "javascript"  // Normal requests
-| project TimeGenerated, Resource, requestUri_s, action_s, Message, clientIp_s
-| order by TimeGenerated desc
-```
-
-**Expected Log:** No entries (normal requests don't trigger WAF rules)
-
----
-
-### Test 2: XSS Attack on /admin/users (KEY TEST)
-
-**Objective:** Demonstrate URL-specific exclusion - same malicious payload produces different results.
-
-**HTTP Request:**
-```bash
-# Using HTTPie
-http GET http://<AGW_STD_IP>/admin/users "Referer:javascript:alert(1)"
-http GET http://<AGW_EXCL_IP>/admin/users "Referer:javascript:alert(1)"
-
-# Using curl
-curl -v http://<AGW_STD_IP>/admin/users -H "Referer: javascript:alert(1)"
-curl -v http://<AGW_EXCL_IP>/admin/users -H "Referer: javascript:alert(1)"
-```
-
-**Expected Result:**
-- AGW-Standard: ❌ 403 Forbidden (WAF blocked by rule 941170)
-- AGW-Exclusion: ✅ 200 OK (Custom allow rule bypassed WAF)
-
-AGW-Exclusion returns:
-```json
-{
     "status": "success",
-    "message": "User management endpoint",
-    "timestamp": "2025-11-05T05:15:17+00:00"
+    "timestamp": "2025-11-05T20:35:04+00:00"
 }
-```
+~~~
 
-**Relevant Terraform (waf-simple.tf):**
+~~~powershell
 
-AGW-Standard WAF Policy (No Custom Rules):
-```hcl
-resource "azurerm_web_application_firewall_policy" "standard" {
-  name                = "${local.resource_prefix}-waf-standard-${random_id.suffix.hex}"
-  resource_group_name = azurerm_resource_group.main.name
-  location            = azurerm_resource_group.main.location
+# Get Application Gateway access logs (last 1 hour)
+az monitor log-analytics query -w $workspaceId --analytics-query "AGWFirewallLogs| where TimeGenerated > ago(1h) | where RuleId == '941170' | where InstanceId == 'appgw_0'| where RequestUri == '/admin/users'| project TimeGenerated, RequestUri, RuleSetType, RuleId, Message, Action, DetailedMessage, DetailedData | order by TimeGenerated desc " --out table
+~~~
 
-  policy_settings {
-    enabled = true
-    mode    = "Prevention"
-  }
+Output: Empty (no WAF blocks for normal requests)
 
-  managed_rules {
-    managed_rule_set {
-      type    = "OWASP"
-      version = "3.2"
-    }
-  }
-}
-```
+| field | value |
+| :--- | :--- |
+| Action | Allowed |
+| DetailedData | |
+| DetailedMessage | |
+| Message | Access allowed. Pattern match /admin/users, at RequestUri. |
+| RequestUri | /admin/users |
+| RuleId | AllowAdminUsersPath |
+| RuleSetType | Custom |
+| TableName | PrimaryResult |
+| TimeGenerated | 2025-11-05T20:52:23Z |
 
-AGW-Exclusion WAF Policy (With Custom Allow Rule):
-```hcl
-resource "azurerm_web_application_firewall_policy" "with_exclusion" {
-  name                = "${local.resource_prefix}-waf-exclusion-${random_id.suffix.hex}"
-  resource_group_name = azurerm_resource_group.main.name
-  location            = azurerm_resource_group.main.location
+## Test: Normal request Exclusion AGW
 
-  policy_settings {
-    enabled = true
-    mode    = "Prevention"
-  }
+~~~powershell
+http GET http://$agwExclusionPubIP/admin/users
+HTTP/1.1 200 OK
+Connection: keep-alive
+Content-Length: 97
+Content-Type: application/json
+Date: Wed, 05 Nov 2025 20:52:23 GMT
+Server: nginx/1.18.0 (Ubuntu)
 
-  # Custom rule evaluated BEFORE managed rules
-  custom_rules {
-    name      = "AllowAdminUsersPath"
-    priority  = 1
-    rule_type = "MatchRule"
-    action    = "Allow"  # Bypasses ALL managed rules
-
-    match_conditions {
-      match_variables {
-        variable_name = "RequestUri"
-      }
-      operator     = "BeginsWith"
-      match_values = ["/admin/users"]
-    }
-  }
-
-  managed_rules {
-    managed_rule_set {
-      type    = "OWASP"
-      version = "3.2"
-    }
-  }
-}
-```
-
-**Log Analytics Query:**
-```kusto
-AGWFirewallLogs
-| where TimeGenerated > ago(1h)
-| where requestUri_s contains "/admin/users"
-| where Message contains "javascript" or action_s == "Blocked"
-| project TimeGenerated, 
-          Resource, 
-          requestUri_s, 
-          action_s, 
-          Message, 
-          ruleId_s,
-          ruleSetType_s,
-          clientIp_s
-| order by TimeGenerated desc
-```
-
-**Expected Logs:**
-
-For AGW-Standard:
-```
-action_s: Blocked
-Message: Matched Data: javascript:alert(1) found within HEADERS:Referer
-ruleId_s: 941170
-ruleSetType_s: OWASP
-```
-
-For AGW-Exclusion:
-```
-action_s: Matched
-Message: Custom rule 'AllowAdminUsersPath' matched
-ruleId_s: (empty - custom rule)
-```
-
----
-
-### Test 3: XSS Attack on /test-xss
-
-**Objective:** Verify custom allow rule is path-specific - exclusion only applies to /admin/users.
-
-**HTTP Request:**
-```bash
-# Using HTTPie
-http GET http://<AGW_STD_IP>/test-xss "Referer:javascript:alert(1)"
-http GET http://<AGW_EXCL_IP>/test-xss "Referer:javascript:alert(1)"
-
-# Using curl
-curl -v http://<AGW_STD_IP>/test-xss -H "Referer: javascript:alert(1)"
-curl -v http://<AGW_EXCL_IP>/test-xss -H "Referer: javascript:alert(1)"
-```
-
-**Expected Result:**
-- AGW-Standard: ❌ 403 Forbidden (WAF blocked by rule 941170)
-- AGW-Exclusion: ❌ 403 Forbidden (Custom rule doesn't match /test-xss)
-
-**Relevant Terraform (waf-simple.tf):**
-```hcl
-# Custom rule in AGW-Exclusion policy
-match_conditions {
-  match_variables {
-    variable_name = "RequestUri"
-  }
-  operator     = "BeginsWith"
-  match_values = ["/admin/users"]  # Only matches /admin/users, NOT /test-xss
-}
-```
-
-**How It Works:**
-1. Request to `/test-xss` arrives at AGW-Exclusion
-2. Custom rule evaluated: `/test-xss` does NOT begin with `/admin/users`
-3. Custom rule doesn't match → proceed to managed rules
-4. Managed rule 941170 detects `javascript:` in Referer
-5. Request blocked with 403
-
-**Log Analytics Query:**
-```kusto
-AGWFirewallLogs
-| where TimeGenerated > ago(1h)
-| where requestUri_s contains "/test-xss"
-| where action_s == "Blocked"
-| project TimeGenerated, Resource, requestUri_s, action_s, Message, ruleId_s
-| order by TimeGenerated desc
-```
-
-**Expected Logs (Both AGWs):**
-```
-action_s: Blocked
-Message: Matched Data: javascript:alert(1) found within HEADERS:Referer
-ruleId_s: 941170
-requestUri_s: /test-xss
-```
-
----
-
-### Test 4: Normal Request to Root Path
-
-**Objective:** Verify backend is healthy and both AGWs route normal traffic correctly.
-
-**HTTP Request:**
-```bash
-# Using HTTPie
-http GET http://<AGW_STD_IP>/
-http GET http://<AGW_EXCL_IP>/
-
-# Using curl
-curl -v http://<AGW_STD_IP>/
-curl -v http://<AGW_EXCL_IP>/
-```
-
-**Expected Result:**
-- AGW-Standard: ✅ 200 OK
-- AGW-Exclusion: ✅ 200 OK
-
-Both return:
-```json
 {
-    "status": "online",
-    "server": "nginx",
-    "message": "Hello World! WAF Test Backend",
-    "timestamp": "2025-11-05T05:18:21+00:00"
+    "message": "User management endpoint",
+    "status": "success",
+    "timestamp": "2025-11-05T20:52:23+00:00"
 }
-```
+~~~
 
-**Relevant Terraform (backend.tf):**
-```hcl
-resource "azurerm_linux_virtual_machine" "backend" {
-  name                = "${local.resource_prefix}-backend-vm-${random_id.suffix.hex}"
-  resource_group_name = azurerm_resource_group.main.name
-  location            = azurerm_resource_group.main.location
-  size                = "Standard_B1s"
-  admin_username      = "azureuser"
-  
-  custom_data = base64encode(templatefile("${path.module}/scripts/setup-webserver-simple.sh", {}))
-  
-  os_disk {
-    caching              = "ReadWrite"
-    storage_account_type = "Standard_LRS"
-  }
+~~~powershell
+# First, get the workspace customer ID (required for queries)
+$workspaceId = az monitor log-analytics workspace show --resource-group $rgName --workspace-name $lawName --query "customerId" --out tsv
 
-  source_image_reference {
-    publisher = "Canonical"
-    offer     = "0001-com-ubuntu-server-jammy"
-    sku       = "22_04-lts"
-    version   = "latest"
-  }
+# Get Application Gateway access logs (last 1 hour)
+az monitor log-analytics query -w $workspaceId --analytics-query "AGWFirewallLogs| where TimeGenerated > ago(1h) | where RuleId == '941170' |where InstanceId == 'appgw_1'| where RequestUri == '/admin/users'| project TimeGenerated, RequestUri, RuleSetType, RuleId, Message, Action, DetailedMessage, DetailedData | order by TimeGenerated desc " --out table
+~~~
+
+Output:
+
+| field | value |
+| :--- | :--- |
+| Action | Matched |
+| DetailedData | { found within [REQUEST_HEADERS:]} |
+| DetailedMessage | |
+| Message | 'Other bots' |
+| RequestUri | /admin/users |
+| RuleId | 300700 |
+| RuleSetType | Microsoft_BotManagerRuleSet |
+| TableName | PrimaryResult |
+| TimeGenerated | 2025-11-05T20:35:03Z |
+
+| field | value |
+| :--- | :--- |
+| Action | Matched |
+| DetailedData | {74.235.228.45 found within [REQUEST_HEADERS:Host:74.235.228.45]} |
+| DetailedMessage | Pattern match ^[\d.:]+$ at REQUEST_HEADERS:host. |
+| Message | Host header is a numeric IP address |
+| RequestUri | /admin/users |
+| RuleId | 920350 |
+| RuleSetType | OWASP CRS |
+| TableName | PrimaryResult |
+| TimeGenerated | 2025-11-05T20:35:03Z |
+
+
+## Test: XSS attack - Standard block
+
+~~~powershell
+http GET "http://$agwStandardPubIP/admin/users?next=javascript:alert(1)" # 403 Blocked
+onnection: keep-alive
+Content-Length: 179
+Content-Type: text/html
+Date: Wed, 05 Nov 2025 20:53:27 GMT
+Server: Microsoft-Azure-Application-Gateway/v2
+
+<html>
+<head><title>403 Forbidden</title></head>
+<body>
+<center><h1>403 Forbidden</h1></center>
+<hr><center>Microsoft-Azure-Application-Gateway/v2</center>
+</body>
+</html>
+~~~
+
+~~~powershell
+# Get Application Gateway access logs (last 1 hour)
+az monitor log-analytics query -w $workspaceId --analytics-query "AGWFirewallLogs| where TimeGenerated > ago(1h) | where InstanceId == 'appgw_0'| where RequestUri == '/admin/users?next=javascript:alert(1)'| project TimeGenerated, RequestUri, RuleSetType, RuleId, Message, Action, DetailedMessage, DetailedData | order by TimeGenerated desc " --out table
+~~~
+
+Output (could not find a block for where RuleId == '941170', so i did include all logs for that RequestUri): 
+
+| field | value |
+| :--- | :--- |
+| Action | Allowed |
+| DetailedData | |
+| DetailedMessage | |
+| Message | Access allowed. Pattern match /admin/users, at RequestUri. |
+| RequestUri | /admin/users?next=javascript:alert(1) |
+| RuleId | AllowAdminUsersPath |
+| RuleSetType | Custom |
+| TableName | PrimaryResult |
+| TimeGenerated | 2025-11-05T20:54:54Z |
+
+## Test: XSS attack - Exclusion allows
+
+~~~powershell
+http GET "http://$agwExclusionPubIP/admin/users?next=javascript:alert(1)" # 200 Allowed
+HTTP/1.1 200 OK
+Connection: keep-alive
+Content-Length: 97
+Content-Type: application/json
+Date: Wed, 05 Nov 2025 20:54:54 GMT
+Server: nginx/1.18.0 (Ubuntu)
+
+{
+    "message": "User management endpoint",
+    "status": "success",
+    "timestamp": "2025-11-05T20:54:54+00:00"
 }
-```
+~~~
 
----
+~~~powershell
+# Get Application Gateway access logs (last 1 hour)
+az monitor log-analytics query -w $workspaceId --analytics-query "AGWFirewallLogs| where TimeGenerated > ago(1h) | where RuleId == '941170' | where InstanceId == 'appgw_1'| where RequestUri == '/admin/users?next=javascript:alert(1)'| project TimeGenerated, RequestUri, RuleSetType, RuleId, Message, Action, DetailedMessage, DetailedData | order by TimeGenerated desc " --out table
+~~~
 
-### Test 5: Direct Backend Access
+| field | value |
+| :--- | :--- |
+| Action | Blocked |
+| DetailedData | Matched Data: javascript:alert( found within ARGS:next: javascript:alert(1) |
+| DetailedMessage | Pattern match (?i)(?:\W|^)(?:javascript:(?:[\s\S]+[=\(\[\.<]|[\s\S]*?(?:\bname\b|\[ux]\d))|data:(?:(?:[a-z]\w+\/\w[\w+-]+\w)?[;,]|[\s\S]*?;[\s\S]*?\b(?:base64|charset=)|[\s\S]*?,[\s\S]*?<[\s\S]*?\w[\s\S]*?>))|@\W*?i\W*?m\W*?p\W*?o\W*?r\W*?t\W*?(?:\/\*[\s\S]*?)?(?:["']|\W*?u\W*?r\W*?l[\s\S]*?\()|\W*?-\W*?m\W*?o\W*?z\W*?-\W*?b\W*?i\W*?n\W*?d\W*?i\W*?n\W*?g[\s\S]*?:[\s\S]*?\W*?u\W*?r\W*?l[\s\S]*?\( at ARGS. |
+| Message | NoScript XSS InjectionChecker: Attribute Injection |
+| RequestUri | /admin/users?next=javascript:alert(1) |
+| RuleId | **941170** |
+| RuleSetType | OWASP CRS |
+| TableName | PrimaryResult |
+| TimeGenerated | 2025-11-05T20:53:27Z |
 
-**Objective:** Verify NSG correctly blocks direct internet access to backend VM.
+## Test: XSS on different path - Standard block
 
-**HTTP Request:**
-```bash
-# Get backend public IP
-terraform output backend_public_ip
+~~~powershell
+http GET "http://$agwStandardPubIP/test-xss?next=javascript:alert(1)"         # 403 Blocked
+HTTP/1.1 403 Forbidden
+Connection: keep-alive
+Content-Length: 179
+Content-Type: text/html
+Date: Wed, 05 Nov 2025 21:12:05 GMT
+Server: Microsoft-Azure-Application-Gateway/v2
 
-# Attempt direct connection (will timeout)
-http GET http://<BACKEND_PUBLIC_IP>/
-curl -v http://<BACKEND_PUBLIC_IP>/admin/users --max-time 10
-```
+<html>
+<head><title>403 Forbidden</title></head>
+<body>
+<center><h1>403 Forbidden</h1></center>
+<hr><center>Microsoft-Azure-Application-Gateway/v2</center>
+</body>
+~~~
 
-**Expected Result:**
-- Result: ❌ Connection timeout
+~~~powershell
+az monitor log-analytics query -w $workspaceId --analytics-query "AGWFirewallLogs| where TimeGenerated > ago(1h) | where RuleId == '941170' | where InstanceId == 'appgw_0'| where RequestUri == '/test-xss?next=javascript:alert(1)'| project TimeGenerated, RequestUri, RuleSetType, RuleId, Message, Action, DetailedMessage, DetailedData | order by TimeGenerated desc " --out table
+~~~
 
-**Relevant Terraform (main.tf):**
-```hcl
-# NSG Rule - HTTP Only from VNet
-resource "azurerm_network_security_group" "backend" {
-  name                = "${local.resource_prefix}-backend-nsg-${random_id.suffix.hex}"
-  location            = azurerm_resource_group.main.location
-  resource_group_name = azurerm_resource_group.main.name
+| field | value |
+| :--- | :--- |
+| Action | Blocked |
+| DetailedData | Matched Data: javascript:alert( found within ARGS:next: javascript:alert(1) |
+| DetailedMessage | Pattern match (?i)(?:\W|^)(?:javascript:(?:[\s\S]+[=\(\[\.<]|[\s\S]*?(?:\bname\b|\[ux]\d))|data:(?:(?:[a-z]\w+\/\w[\w+-]+\w)?[;,]|[\s\S]*?;[\s\S]*?\b(?:base64|charset=)|[\s\S]*?,[\s\S]*?<[\s\S]*?\w[\s\S]*?>))|@\W*?i\W*?m\W*?p\W*?o\W*?r\W*?t\W*?(?:\/\*[\s\S]*?)?(?:["']|\W*?u\W*?r\W*?l[\s\S]*?\()|\W*?-\W*?m\W*?o\W*?z\W*?-\W*?b\W*?i\W*?n\W*?d\W*?i\W*?n\W*?g[\s\S]*?:[\s\S]*?\W*?u\W*?r\W*?l[\s\S]*?\( at ARGS. |
+| Message | NoScript XSS InjectionChecker: Attribute Injection |
+| RequestUri | /test-xss?next=javascript:alert(1) |
+| RuleId | **941170** |
+| RuleSetType | OWASP CRS |
+| TableName | PrimaryResult |
+| TimeGenerated | 2025-11-05T21:12:05Z |
 
-  security_rule {
-    name                       = "HTTP"
-    priority                   = 1001
-    direction                  = "Inbound"
-    access                     = "Allow"
-    protocol                   = "Tcp"
-    source_port_range          = "*"
-    destination_port_range     = "80"
-    source_address_prefix      = "10.0.0.0/16"  # Only from VNet (AGW subnets)
-    destination_address_prefix = "*"
-  }
 
-  security_rule {
-    name                       = "SSH"
-    priority                   = 1002
-    direction                  = "Inbound"
-    access                     = "Allow"
-    protocol                   = "Tcp"
-    source_port_range          = "*"
-    destination_port_range     = "22"
-    source_address_prefix      = "*"
-    destination_address_prefix = "*"
-  }
-}
-```
+## Test: XSS on different path - Exclusion block
 
-**Security Analysis:**
-- ✅ Application Gateways can reach backend (they're in 10.0.1.0/24 and 10.0.3.0/24)
-- ❌ Direct internet access blocked (source must be from VNet 10.0.0.0/16)
-- ✅ Correct security posture - all traffic must flow through WAF-protected AGW
+~~~powershell
+http GET "http://$agwExclusionPubIP/test-xss?next=javascript:alert(1)"        # 403 Blocked
+Connection: keep-alive
+Content-Length: 179
+Content-Type: text/html
+Date: Wed, 05 Nov 2025 21:12:09 GMT
+Server: Microsoft-Azure-Application-Gateway/v2
 
----
+<html>
+<head><title>403 Forbidden</title></head>
+<body>
+<center><h1>403 Forbidden</h1></center>
+<hr><center>Microsoft-Azure-Application-Gateway/v2</center>
+</body>
+</html>
+~~~
 
-### Test 6: XSS Attack on /xyz Path
+~~~powershell
+# Get Application Gateway access logs (last 1 hour)
+az monitor log-analytics query -w $workspaceId --analytics-query "AGWFirewallLogs| where TimeGenerated > ago(1h) | where RuleId == '941170' | where InstanceId == 'appgw_1'| where RequestUri == '/test-xss?next=javascript:alert(1)'| project TimeGenerated, RequestUri, RuleSetType, RuleId, Message, Action, DetailedMessage, DetailedData | order by TimeGenerated desc " --out table
+~~~
 
-**Objective:** Further validate custom allow rule scope.
+| field | value |
+| :--- | :--- |
+| Action | Blocked |
+| DetailedData | Matched Data: javascript:alert( found within ARGS:next: javascript:alert(1) |
+| DetailedMessage | Pattern match (?i)(?:\W|^)(?:javascript:(?:[\s\S]+[=\(\[\.<]|[\s\S]*?(?:\bname\b|\[ux]\d))|data:(?:(?:[a-z]\w+\/\w[\w+-]+\w)?[;,]|[\s\S]*?;[\s\S]*?\b(?:base64|charset=)|[\s\S]*?,[\s\S]*?<[\s\S]*?\w[\s\S]*?>))|@\W*?i\W*?m\W*?p\W*?o\W*?r\W*?t\W*?(?:\/\*[\s\S]*?)?(?:["']|\W*?u\W*?r\W*?l[\s\S]*?\()|\W*?-\W*?m\W*?o\W*?z\W*?-\W*?b\W*?i\W*?n\W*?d\W*?i\W*?n\W*?g[\s\S]*?:[\s\S]*?\W*?u\W*?r\W*?l[\s\S]*?\( at ARGS. |
+| Message | NoScript XSS InjectionChecker: Attribute Injection |
+| RequestUri | /test-xss?next=javascript:alert(1) |
+| RuleId | **941170** |
+| RuleSetType | OWASP CRS |
+| TableName | PrimaryResult |
+| TimeGenerated | 2025-11-05T21:12:09Z |
 
-**HTTP Request:**
-```bash
-# Using HTTPie
-http GET http://<AGW_STD_IP>/xyz "Referer:javascript:alert(1)"
-http GET http://<AGW_EXCL_IP>/xyz "Referer:javascript:alert(1)"
+## Terraform Implementation and Security Risks
 
-# Using curl
-curl -v http://<AGW_STD_IP>/xyz -H "Referer: javascript:alert(1)"
-curl -v http://<AGW_EXCL_IP>/xyz -H "Referer: javascript:alert(1)"
-```
+### How the Exclusion Works in Terraform
 
-**Expected Result:**
-- AGW-Standard: ❌ 403 Forbidden
-- AGW-Exclusion: ❌ 403 Forbidden
+The exclusion is implemented using a custom rule in the WAF policy. In waf.tf, the policy with_exclusion contains a custom_rules block:
 
-**Log Analytics Query:**
-```kusto
-AGWFirewallLogs
-| where TimeGenerated > ago(1h)
-| where requestUri_s contains "/xyz"
-| where action_s == "Blocked"
-| project TimeGenerated, Resource, action_s, ruleId_s, Message
-| order by TimeGenerated desc
-```
-
----
-
-## Test Results Summary
-
-| Test | Path | Payload | AGW-Standard | AGW-Exclusion | Proves |
-|------|------|---------|--------------|---------------|--------|
-| 1 | /admin/users | Normal | ✅ 200 | ✅ 200 | Both allow legitimate traffic |
-| 2 | /admin/users | XSS | ❌ 403 | ✅ 200 | **URL-specific exclusion works** |
-| 3 | /test-xss | XSS | ❌ 403 | ❌ 403 | **Exclusion is path-specific** |
-| 4 | / | Normal | ✅ 200 | ✅ 200 | Backend healthy |
-| 5 | Direct backend | Any | ❌ Timeout | ❌ Timeout | NSG properly isolates backend |
-| 6 | /xyz | XSS | ❌ 403 | ❌ 403 | Further validates path-specificity |
-
----
-
-## Comprehensive Log Analytics Queries
-
-### View All WAF Activity (Last Hour)
-```kusto
-AGWFirewallLogs
-| where TimeGenerated > ago(1h)
-| project TimeGenerated, 
-          AGW = tostring(split(Resource, "/")[8]),
-          URI = requestUri_s,
-          Action = action_s,
-          Rule = ruleId_s,
-          Message,
-          ClientIP = clientIp_s
-| order by TimeGenerated desc
-```
-
-### Compare Behavior Between AGWs
-```kusto
-AGWFirewallLogs
-| where TimeGenerated > ago(1h)
-| where requestUri_s contains "/admin/users"
-| summarize Count=count(), 
-            Actions=make_set(action_s), 
-            Rules=make_set(ruleId_s) 
-  by Resource, requestUri_s
-| project Resource, 
-          Count, 
-          Actions = strcat_array(Actions, ", "), 
-          Rules = strcat_array(Rules, ", ")
-```
-
-### Find All Blocked Requests
-```kusto
-AGWFirewallLogs
-| where TimeGenerated > ago(24h)
-| where action_s == "Blocked"
-| summarize Count=count() by requestUri_s, ruleId_s, Message
-| order by Count desc
-```
-
-### Verify Custom Rule Matches
-```kusto
-AGWFirewallLogs
-| where TimeGenerated > ago(1h)
-| where Message contains "AllowAdminUsersPath"
-| project TimeGenerated, requestUri_s, action_s, Message, clientIp_s
-| order by TimeGenerated desc
-```
-
-### Detect Rule 941170 Triggers
-```kusto
-AGWFirewallLogs
-| where TimeGenerated > ago(1h)
-| where ruleId_s == "941170"
-| project TimeGenerated,
-          AGW = tostring(split(Resource, "/")[8]),
-          URI = requestUri_s,
-          Action = action_s,
-          Message
-| order by TimeGenerated desc
-```
-
-**See [README-simple.md](./README-simple.md) for complete query documentation.**
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Shared Backend VM                         │
-│  Ubuntu + nginx serving JSON on 4 endpoints                 │
-│  - /                  → Hello World                          │
-│  - /admin/users       → User Management (triggers 941170)    │
-│  - /test-xss          → Test endpoint                        │
-│  - /xyz               → Additional test path                 │
-└─────────────────────────────────────────────────────────────┘
-                          ▲              ▲
-                          │              │
-           ┌──────────────┴──┐    ┌─────┴──────────────┐
-           │                 │    │                     │
-    ┌──────┴──────┐   ┌──────┴────┴───┐   ┌───────────┴─────┐
-    │   AGW-STD   │   │  Shared Log    │   │   AGW-EXCL      │
-    │  (Standard) │   │   Analytics    │   │  (Exclusion)    │
-    └─────────────┘   │   Workspace    │   └─────────────────┘
-                      └────────────────┘
-    WAF Policy:            Logs both         WAF Policy:
-    - OWASP 3.2           AGWs to same       - OWASP 3.2
-    - No custom rules     workspace          - Custom Allow Rule
-                                               for /admin/users
-```
-
----
-
-## WAF Rule 941170
-
-**Rule Name:** NoScript XSS InjectionChecker: Attribute Injection  
-**Detects:** `javascript:` protocol in headers (Referer, User-Agent, etc.)  
-**Part of:** OWASP 3.2 Core Rule Set
-
----
-
-## Custom Allow Rule Mechanism
-
-```hcl
-# From waf-simple.tf - AGW-Exclusion policy
+```terraform
 custom_rules {
   name      = "AllowAdminUsersPath"
-  priority  = 1                    # Evaluated BEFORE managed rules
+  priority  = 1
   rule_type = "MatchRule"
-  action    = "Allow"              # Bypasses ALL managed rules
-  
+  action    = "Allow"
+
   match_conditions {
     match_variables {
       variable_name = "RequestUri"
     }
     operator     = "BeginsWith"
-    match_values = ["/admin/users"]  # Only this path
+    match_values = ["/admin/users"]
   }
 }
 ```
 
-**How It Works:**
-1. Request arrives at AGW-Exclusion
-2. Custom rules evaluated first (priority 1)
-3. If RequestUri matches `/admin/users` → Action: Allow
-4. Request bypasses ALL managed rules (including 941170)
-5. Request forwarded to backend
+The custom rule uses priority 1 and action Allow. When a request matches the RequestUri pattern, WAF immediately allows it and stops processing. No managed OWASP rules are evaluated for matching requests.
 
-**Why /test-xss Still Gets Blocked:**
-1. Custom rule checked: `/test-xss` doesn't match `/admin/users`
-2. Proceeds to managed rules evaluation
-3. Rule 941170 detects `javascript:` in Referer
-4. Request blocked with 403
+### Critical Security Risks
 
----
+Complete WAF Bypass: Once the custom Allow rule matches, all managed rules are skipped. The request bypasses not just rule 941170, but the entire OWASP ruleset including SQL injection (942xxx), command injection (932xxx), remote file inclusion (931xxx), and all other protections.
 
-## Production Recommendations
+Multi-Vector Attacks: A single request to /admin/users can contain multiple attack patterns. Example: /admin/users?next=javascript:alert(1)&id=1' OR '1'='1 contains both XSS and SQL injection. Both attacks reach the backend unfiltered.
 
-### ⚠️ Don't Use Custom Allow Rules in Production
+Path Scope Too Broad: The BeginsWith operator matches /admin/users, /admin/users/123, /admin/users/delete, and all subpaths. Every endpoint under this path loses WAF protection entirely.
 
-This demo uses a **broad custom allow rule** that bypasses ALL WAF protection for `/admin/users`. 
+No Validation Layer: The backend receives malicious payloads directly. If the application has any vulnerability (improper input sanitization, database query construction, template rendering), attackers can exploit it through the allowed path.
 
-### ✅ Better Approach: Managed Rule Exclusions
+### Recommendation
 
-```hcl
-managed_rules {
-  exclusion {
-    match_variable          = "RequestHeaderNames"
-    selector               = "Referer"
-    selector_match_operator = "Equals"
-    
-    excluded_rule_set {
-      rule_group {
-        rule_group_name = "REQUEST-941-APPLICATION-ATTACK-XSS"
-        excluded_rules  = ["941170"]
-      }
-    }
-  }
-  
-  managed_rule_set {
-    type    = "OWASP"
-    version = "3.2"
-  }
-}
-```
+Use WAF exclusions sparingly and only when absolutely necessary.
 
-**Benefits:**
-- Only excludes Referer header from rule 941170
-- Other headers still checked by 941170
-- All other XSS rules still inspect Referer
-- More granular and secure
-
-## Files
-
-- `waf-simple.tf` - Main infrastructure (2 AGWs, 2 WAF policies)
-- `main.tf` - Shared resources (VNet, NSG, Log Analytics)
-- `backend.tf` - Shared backend VM with nginx
-- `scripts/setup-webserver-simple.sh` - nginx configuration
-- `outputs.tf` - Deployment outputs
-- `waf.tf.old` - Legacy configuration (archived)
-
-## Cleanup
-
-```bash
-terraform destroy -auto-approve
-```
-
-## References
-
-- [Azure WAF Rule Groups (OWASP 3.2)](https://learn.microsoft.com/en-us/azure/web-application-firewall/ag/application-gateway-crs-rulegroups-rules)
-- [WAF Custom Rules Overview](https://learn.microsoft.com/en-us/azure/web-application-firewall/ag/custom-waf-rules-overview)
-- [WAF Exclusion Configuration](https://learn.microsoft.com/en-us/azure/web-application-firewall/ag/application-gateway-waf-configuration)
-- [Resource-Specific Diagnostic Settings](https://learn.microsoft.com/en-us/azure/azure-monitor/essentials/resource-logs)

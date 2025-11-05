@@ -1,3 +1,9 @@
+variable "prefix" {
+  description = "Prefix for all resources"
+  type        = string
+  default     = "cptdazwafexclude"
+}
+
 variable "subscription_id" {
   description = "Azure Subscription ID"
   type        = string

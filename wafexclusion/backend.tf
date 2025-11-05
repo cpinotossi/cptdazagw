@@ -1,6 +1,6 @@
 # Test Backend VM to simulate a web server
 resource "azurerm_network_interface" "backend" {
-  name                = "${local.resource_prefix}-backend-nic-${random_id.suffix.hex}"
+  name                = "${var.prefix}1"
   location            = azurerm_resource_group.main.location
   resource_group_name = azurerm_resource_group.main.name
 
@@ -15,7 +15,7 @@ resource "azurerm_network_interface" "backend" {
 
 # Test VM to act as backend web server
 resource "azurerm_linux_virtual_machine" "backend" {
-  name                = "${local.resource_prefix}-backend-vm-${random_id.suffix.hex}"
+  name                = var.prefix
   resource_group_name = azurerm_resource_group.main.name
   location            = azurerm_resource_group.main.location
   size                = "Standard_B1s"
@@ -49,7 +49,7 @@ resource "azurerm_linux_virtual_machine" "backend" {
 
 # Public IP for direct access to backend (for testing)
 resource "azurerm_public_ip" "backend" {
-  name                = "${local.resource_prefix}-backend-pip-${random_id.suffix.hex}"
+  name                = var.prefix
   resource_group_name = azurerm_resource_group.main.name
   location            = azurerm_resource_group.main.location
   allocation_method   = "Static"
@@ -60,7 +60,7 @@ resource "azurerm_public_ip" "backend" {
 
 # Associate public IP with backend NIC
 resource "azurerm_network_interface" "backend_public" {
-  name                = "${local.resource_prefix}-backend-public-nic-${random_id.suffix.hex}"
+  name                = "${var.prefix}2"
   location            = azurerm_resource_group.main.location
   resource_group_name = azurerm_resource_group.main.name
 

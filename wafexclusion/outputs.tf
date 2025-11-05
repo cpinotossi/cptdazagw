@@ -41,25 +41,25 @@ output "test_commands" {
     • Backend:  ${azurerm_network_interface.backend.private_ip_address}
     
     📋 Test 1: Normal Request (Both AGWs Allow)
-    curl -v http://${azurerm_public_ip.appgw1.ip_address}/admin/users
-    curl -v http://${azurerm_public_ip.appgw2.ip_address}/admin/users
+    http GET http://${azurerm_public_ip.appgw1.ip_address}/admin/users
+    http GET http://${azurerm_public_ip.appgw2.ip_address}/admin/users
     Expected: Both return 200 OK
-    
+
     📋 Test 2: XSS on /admin/users (Standard Blocks, Exclusion Allows)
-    curl -v http://${azurerm_public_ip.appgw1.ip_address}/admin/users -H "Referer: javascript:alert(1)"
+    http GET http://${azurerm_public_ip.appgw1.ip_address}/admin/users "Referer:javascript:alert(1)"
     Expected: 403 Forbidden (rule 941170)
-    
-    curl -v http://${azurerm_public_ip.appgw2.ip_address}/admin/users -H "Referer: javascript:alert(1)"
+
+    http GET http://${azurerm_public_ip.appgw2.ip_address}/admin/users "Referer:javascript:alert(1)"
     Expected: 200 OK (custom allow rule bypassed WAF)
-    
+
     📋 Test 3: XSS on /test-xss (Both AGWs Block)
-    curl -v http://${azurerm_public_ip.appgw1.ip_address}/test-xss -H "Referer: javascript:alert(1)"
-    curl -v http://${azurerm_public_ip.appgw2.ip_address}/test-xss -H "Referer: javascript:alert(1)"
+    http GET http://${azurerm_public_ip.appgw1.ip_address}/test-xss "Referer:javascript:alert(1)"
+    http GET http://${azurerm_public_ip.appgw2.ip_address}/test-xss "Referer:javascript:alert(1)"
     Expected: Both return 403 Forbidden
-    
-    � Test 4: Direct Backend Access
-    curl -v http://${azurerm_public_ip.backend.ip_address}/admin/users
-    Expected: 200 OK (no WAF)
+
+    📋 Test 4: Direct Backend Access
+    http --timeout 10 GET http://${azurerm_public_ip.backend.ip_address}/admin/users
+    Expected: Connection timeout (backend isolated)
     
     🔍 Monitor WAF Logs:
     AGWFirewallLogs

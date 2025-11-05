@@ -1,10 +1,13 @@
-# WAF Policy WITHOUT Exclusions (Standard Protection)
+# Simplified WAF Demo: Two Application Gateways, Two WAF Policies
+# AGW 1: Standard WAF (blocks 941170)
+# AGW 2: WAF with custom exclusion for /admin/users path
+
+# WAF Policy 1: Standard Protection (NO exclusions)
 resource "azurerm_web_application_firewall_policy" "standard" {
-  name                = "${local.resource_prefix}-wafpol-standard-${random_id.suffix.hex}"
+  name                = "${var.prefix}1"
   resource_group_name = azurerm_resource_group.main.name
   location            = azurerm_resource_group.main.location
-
-  tags = azurerm_resource_group.main.tags
+  tags                = azurerm_resource_group.main.tags
 
   policy_settings {
     enabled                     = true
@@ -14,13 +17,23 @@ resource "azurerm_web_application_firewall_policy" "standard" {
     file_upload_limit_in_mb    = 100
   }
 
-  # NO custom rules - all requests go through managed rules
-  
-  # Managed Rules - OWASP Core Rule Set 3.2
+  # NO custom rules - all managed rules active
+
   managed_rules {
     managed_rule_set {
       type    = "OWASP"
       version = "3.2"
+      
+      # Explicitly enable 941170 (it's enabled by default, but making it clear)
+      rule_group_override {
+        rule_group_name = "REQUEST-941-APPLICATION-ATTACK-XSS"
+        
+        rule {
+          id      = "941170"
+          enabled = true
+          action  = "Block"
+        }
+      }
     }
 
     managed_rule_set {
@@ -30,13 +43,12 @@ resource "azurerm_web_application_firewall_policy" "standard" {
   }
 }
 
-# WAF Policy WITH URL-Specific Exclusion
+# WAF Policy 2: With Custom Exclusion for /admin/users
 resource "azurerm_web_application_firewall_policy" "with_exclusion" {
-  name                = "${local.resource_prefix}-wafpol-exclusion-${random_id.suffix.hex}"
+  name                = "${var.prefix}2"
   resource_group_name = azurerm_resource_group.main.name
   location            = azurerm_resource_group.main.location
-
-  tags = azurerm_resource_group.main.tags
+  tags                = azurerm_resource_group.main.tags
 
   policy_settings {
     enabled                     = true
@@ -46,9 +58,30 @@ resource "azurerm_web_application_firewall_policy" "with_exclusion" {
     file_upload_limit_in_mb    = 100
   }
 
-  # Custom Rule: Allow /admin/content-editor to bypass all managed rules
+  managed_rules {
+    managed_rule_set {
+      type    = "OWASP"
+      version = "3.2"
+      
+      rule_group_override {
+        rule_group_name = "REQUEST-941-APPLICATION-ATTACK-XSS"
+        
+        rule {
+          id      = "941170"
+          enabled = true
+          action  = "Block"
+        }
+      }
+    }
+
+    managed_rule_set {
+      type    = "Microsoft_BotManagerRuleSet"
+      version = "1.0"
+    }
+  }
+
   custom_rules {
-    name      = "AllowContentEditorPath"
+    name      = "AllowAdminUsersPath"
     priority  = 1
     rule_type = "MatchRule"
     action    = "Allow"
@@ -57,100 +90,83 @@ resource "azurerm_web_application_firewall_policy" "with_exclusion" {
       match_variables {
         variable_name = "RequestUri"
       }
-      operator           = "BeginsWith"
-      negation_condition = false
-      match_values       = ["/admin/content-editor"]
-    }
-  }
-
-  # Managed Rules - OWASP Core Rule Set 3.2 (same as standard)
-  managed_rules {
-    managed_rule_set {
-      type    = "OWASP"
-      version = "3.2"
-    }
-
-    managed_rule_set {
-      type    = "Microsoft_BotManagerRuleSet"
-      version = "1.0"
-    }
-  }
-}
-          id      = "942100"
-          enabled = true
-          action  = "Block"
-        }
-        
-        rule {
-          id      = "942110"
-          enabled = true
-          action  = "Block"
-        }
-      }
-
-      rule_group_override {
-        rule_group_name = "REQUEST-930-APPLICATION-ATTACK-LFI"
-        
-        # Rules that might trigger on wp-admin
-        rule {
-          id      = "930100"
-          enabled = true
-          action  = "Block"
-        }
-      }
-    }
-
-    # Microsoft Bot Manager Rule Set
-    managed_rule_set {
-      type    = "Microsoft_BotManagerRuleSet"
-      version = "1.0"
-    }
-
-    # Exclusions (these don't help with path-specific issues)
-    exclusion {
-      match_variable          = "RequestHeaderNames"
-      selector               = "User-Agent"
-      selector_match_operator = "Contains"
+      operator     = "BeginsWith"
+      match_values = ["/admin/users"]
     }
   }
 }
 
-# Application Gateway
-resource "azurerm_application_gateway" "main" {
-  name                = "${local.resource_prefix}-appgw-${random_id.suffix.hex}"
+# Public IP for Application Gateway 1 (Standard WAF)
+resource "azurerm_public_ip" "appgw1" {
+  name                = "${var.prefix}2"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  allocation_method   = "Static"
+  sku                 = "Standard"
+  tags                = azurerm_resource_group.main.tags
+}
+
+# Public IP for Application Gateway 2 (With Exclusion)
+resource "azurerm_public_ip" "appgw2" {
+  name                = "${var.prefix}3"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  allocation_method   = "Static"
+  sku                 = "Standard"
+  tags                = azurerm_resource_group.main.tags
+}
+
+# Subnet for Application Gateway 1
+resource "azurerm_subnet" "appgw1" {
+  name                 = "${var.prefix}2"
+  resource_group_name  = azurerm_resource_group.main.name
+  virtual_network_name = azurerm_virtual_network.main.name
+  address_prefixes     = ["10.0.1.0/24"]
+}
+
+# Subnet for Application Gateway 2
+resource "azurerm_subnet" "appgw2" {
+  name                 = "${var.prefix}3"
+  resource_group_name  = azurerm_resource_group.main.name
+  virtual_network_name = azurerm_virtual_network.main.name
+  address_prefixes     = ["10.0.3.0/24"]
+}
+
+# Application Gateway 1: Standard WAF (NO exclusions)
+resource "azurerm_application_gateway" "standard" {
+  name                = "${var.prefix}1"
   resource_group_name = azurerm_resource_group.main.name
   location            = azurerm_resource_group.main.location
-
-  tags = azurerm_resource_group.main.tags
+  tags                = azurerm_resource_group.main.tags
 
   sku {
     name     = "WAF_v2"
     tier     = "WAF_v2"
-    capacity = 2
+    capacity = 1
   }
 
   gateway_ip_configuration {
-    name      = "appGatewayIpConfig"
-    subnet_id = azurerm_subnet.appgw.id
+    name      = "gateway-ip-config"
+    subnet_id = azurerm_subnet.appgw1.id
   }
 
   frontend_port {
-    name = "http"
+    name = "http-port"
     port = 80
   }
 
   frontend_ip_configuration {
-    name                 = "appGwPublicFrontendIp"
-    public_ip_address_id = azurerm_public_ip.appgw.id
+    name                 = "frontend-ip-config"
+    public_ip_address_id = azurerm_public_ip.appgw1.id
   }
 
   backend_address_pool {
-    name = "backend-pool"
+    name         = "backend-pool"
     ip_addresses = [azurerm_network_interface.backend.private_ip_address]
   }
 
   backend_http_settings {
-    name                  = "backend-http-settings"
+    name                  = "http-settings"
     cookie_based_affinity = "Disabled"
     port                  = 80
     protocol              = "Http"
@@ -159,9 +175,10 @@ resource "azurerm_application_gateway" "main" {
 
   http_listener {
     name                           = "http-listener"
-    frontend_ip_configuration_name = "appGwPublicFrontendIp"
-    frontend_port_name             = "http"
+    frontend_ip_configuration_name = "frontend-ip-config"
+    frontend_port_name             = "http-port"
     protocol                       = "Http"
+    firewall_policy_id             = azurerm_web_application_firewall_policy.standard.id
   }
 
   request_routing_rule {
@@ -169,28 +186,109 @@ resource "azurerm_application_gateway" "main" {
     rule_type                  = "Basic"
     http_listener_name         = "http-listener"
     backend_address_pool_name  = "backend-pool"
-    backend_http_settings_name = "backend-http-settings"
-    priority                   = 1
+    backend_http_settings_name = "http-settings"
+    priority                   = 100
   }
 
-  # SSL Policy Configuration
   ssl_policy {
     policy_type = "Predefined"
     policy_name = "AppGwSslPolicy20220101"
   }
-
-  # Associate WAF Policy
-  firewall_policy_id = azurerm_web_application_firewall_policy.main.id
-
-  depends_on = [
-    azurerm_web_application_firewall_policy.main
-  ]
 }
 
-# Diagnostic setting to send WAF logs to Log Analytics (Resource-Specific)
-resource "azurerm_monitor_diagnostic_setting" "appgw" {
-  name                           = "appgw-diagnostics"
-  target_resource_id             = azurerm_application_gateway.main.id
+# Application Gateway 2: With Custom Exclusion
+resource "azurerm_application_gateway" "with_exclusion" {
+  name                = "${var.prefix}2"
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+  tags                = azurerm_resource_group.main.tags
+
+  sku {
+    name     = "WAF_v2"
+    tier     = "WAF_v2"
+    capacity = 1
+  }
+
+  gateway_ip_configuration {
+    name      = "gateway-ip-config"
+    subnet_id = azurerm_subnet.appgw2.id
+  }
+
+  frontend_port {
+    name = "http-port"
+    port = 80
+  }
+
+  frontend_ip_configuration {
+    name                 = "frontend-ip-config"
+    public_ip_address_id = azurerm_public_ip.appgw2.id
+  }
+
+  backend_address_pool {
+    name         = "backend-pool"
+    ip_addresses = [azurerm_network_interface.backend.private_ip_address]
+  }
+
+  backend_http_settings {
+    name                  = "http-settings"
+    cookie_based_affinity = "Disabled"
+    port                  = 80
+    protocol              = "Http"
+    request_timeout       = 20
+  }
+
+  http_listener {
+    name                           = "http-listener"
+    frontend_ip_configuration_name = "frontend-ip-config"
+    frontend_port_name             = "http-port"
+    protocol                       = "Http"
+    firewall_policy_id             = azurerm_web_application_firewall_policy.with_exclusion.id
+  }
+
+  request_routing_rule {
+    name                       = "routing-rule"
+    rule_type                  = "Basic"
+    http_listener_name         = "http-listener"
+    backend_address_pool_name  = "backend-pool"
+    backend_http_settings_name = "http-settings"
+    priority                   = 100
+  }
+
+  ssl_policy {
+    policy_type = "Predefined"
+    policy_name = "AppGwSslPolicy20220101"
+  }
+}
+
+# Diagnostic Settings for AppGW 1 (Standard)
+resource "azurerm_monitor_diagnostic_setting" "appgw1" {
+  name                           = "${var.prefix}1"
+  target_resource_id             = azurerm_application_gateway.standard.id
+  log_analytics_workspace_id     = azurerm_log_analytics_workspace.main.id
+  log_analytics_destination_type = "Dedicated"
+
+  enabled_log {
+    category = "ApplicationGatewayAccessLog"
+  }
+
+  enabled_log {
+    category = "ApplicationGatewayPerformanceLog"
+  }
+
+  enabled_log {
+    category = "ApplicationGatewayFirewallLog"
+  }
+
+  metric {
+    category = "AllMetrics"
+    enabled  = true
+  }
+}
+
+# Diagnostic Settings for AppGW 2 (With Exclusion)
+resource "azurerm_monitor_diagnostic_setting" "appgw2" {
+  name                           = "${var.prefix}2"
+  target_resource_id             = azurerm_application_gateway.with_exclusion.id
   log_analytics_workspace_id     = azurerm_log_analytics_workspace.main.id
   log_analytics_destination_type = "Dedicated"
 
